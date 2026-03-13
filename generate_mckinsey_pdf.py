@@ -454,23 +454,148 @@ def create_pdf_report(base_path, output_path):
                               ParagraphStyle('BranchSum', fontSize=9, textColor=DARK_GRAY, fontName='Helvetica')))
         story.append(Spacer(1, 0.15*inch))
         
-        # Sort product groups by cost
-        sorted_pg = sorted(branch_pg_data.items(), 
-                         key=lambda x: sum(float(r.get('cost_value', 0) or 0) for r in x[1]), 
-                         reverse=True)
+        # Create single table with all parts, visually separated by PGROUP
+        # Sort all parts by PGROUP then by cost value
+        all_branch_parts = []
+        for pg, parts in branch_pg_data.items():
+            for part in parts:
+                part['_pgroup'] = pg
+                all_branch_parts.append(part)
         
-        # Create tables for each product group
-        for pg, parts in sorted_pg:
-            pg_desc = PGROUP_MAP.get(pg, '—')
+        # Sort by PGROUP, then by cost value within each PGROUP
+        all_branch_parts.sort(key=lambda x: (x.get('_pgroup', ''), -float(x.get('cost_value', 0) or 0)))
+        
+        # Build table with PGROUP section headers
+        table_data = [['Part No', 'Description', 'Qty', 'Unit Cost', 'Total Cost', 'Order Ref', 'Last Sold']]
+        
+        current_pg = None
+        pg_subtotal = 0
+        pg_qty_subtotal = 0
+        pg_parts_count = 0
+        
+        for row in all_branch_parts:
+            pg = row.get('_pgroup', 'UNKNOWN')
             
-            # PGROUP header
-            story.append(Paragraph(f"<b>{pg}</b> — {pg_desc}", pg_header))
-            story.append(Spacer(1, 0.08*inch))
+            # Add PGROUP header row when PGROUP changes
+            if pg != current_pg:
+                # Add subtotal for previous PGROUP if exists
+                if current_pg is not None:
+                    pg_desc = PGROUP_MAP.get(current_pg, '—')
+                    table_data.append(['', f'{current_pg} — {pg_desc} SUBTOTAL', f'{pg_qty_subtotal:,}', '', f'R{pg_subtotal:,.2f}', '', ''])
+                    table_data.append(['', '', '', '', '', '', ''])  # Spacer row
+                
+                # Reset subtotals
+                pg_subtotal = 0
+                pg_qty_subtotal = 0
+                pg_parts_count = 0
+                current_pg = pg
+                
+                # Add PGROUP header row
+                pg_desc = PGROUP_MAP.get(pg, '—')
+                table_data.append([f'▶ {pg}', pg_desc, '', '', '', '', ''])
             
-            # Parts table
-            pg_table = create_pgroup_table(parts, pg, pg_desc)
-            story.append(pg_table)
-            story.append(Spacer(1, 0.15*inch))
+            # Add part row
+            partno = row.get('partno', '')[:16]
+            desc = row.get('sdesc', '')[:20]
+            qoh = row.get('qoh', '0')
+            lcost = float(row.get('lcost', 0) or 0)
+            cost_val = float(row.get('cost_value', 0) or 0)
+            order_ref = (row.get('last_order_ref') or '—')[:10]
+            lsold = (row.get('lsold') or '—')[:10]
+            
+            table_data.append([
+                partno,
+                desc,
+                qoh,
+                f"R{lcost:.2f}",
+                f"R{cost_val:,.2f}",
+                order_ref,
+                lsold
+            ])
+            
+            pg_subtotal += cost_val
+            pg_qty_subtotal += int(row.get('qoh', 0) or 0)
+            pg_parts_count += 1
+        
+        # Add final PGROUP subtotal
+        if current_pg is not None:
+            pg_desc = PGROUP_MAP.get(current_pg, '—')
+            table_data.append(['', f'{current_pg} — {pg_desc} SUBTOTAL', f'{pg_qty_subtotal:,}', '', f'R{pg_subtotal:,.2f}', '', ''])
+        
+        # Add branch total
+        table_data.append(['', 'BRANCH TOTAL', f'{branch_qty:,}', '', f'R{branch_cost:,.2f}', '', ''])
+        
+        # Create table with visual styling
+        branch_table = Table(table_data, colWidths=[70, 90, 35, 55, 65, 55, 55])
+        
+        # Build style commands
+        style_commands = [
+            # Header row
+            ('BACKGROUND', (0, 0), (-1, 0), BLACK),
+            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 7),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            
+            # Body
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 7),
+            ('ALIGN', (2, 0), (2, -1), 'CENTER'),
+            ('ALIGN', (3, 0), (4, -1), 'RIGHT'),
+            ('ALIGN', (5, 0), (6, -1), 'CENTER'),
+            
+            # Grid
+            ('GRID', (0, 0), (-1, -1), 0.25, MID_GRAY),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING', (0, 0), (-1, -1), 3),
+        ]
+        
+        # Apply alternating backgrounds and highlight PGROUP headers/subtotals
+        row_idx = 1
+        is_pgroup_section = False
+        
+        for i, row in enumerate(table_data[1:], 1):
+            first_cell = row[0] if row else ''
+            
+            # PGROUP header row (starts with ▶)
+            if first_cell.startswith('▶'):
+                style_commands.append(('BACKGROUND', (0, i), (-1, i), LIGHT_GRAY))
+                style_commands.append(('FONTNAME', (0, i), (-1, i), 'Helvetica-Bold'))
+                style_commands.append(('FONTSIZE', (0, i), (-1, i), 8))
+                style_commands.append(('SPAN', (0, i), (1, i)))  # Merge first two cells
+                style_commands.append(('LINEABOVE', (0, i), (-1, i), 1, BLACK))
+                is_pgroup_section = True
+                row_idx = 0
+            # Subtotal row
+            elif 'SUBTOTAL' in str(row[1]) or 'BRANCH TOTAL' in str(row[1]):
+                style_commands.append(('BACKGROUND', (0, i), (-1, i), LIGHT_GRAY))
+                style_commands.append(('FONTNAME', (0, i), (-1, i), 'Helvetica-Bold'))
+                style_commands.append(('FONTSIZE', (0, i), (-1, i), 7))
+                style_commands.append(('LINEABOVE', (0, i), (-1, i), 0.5, BLACK))
+            # Empty spacer row
+            elif all(cell == '' for cell in row):
+                style_commands.append(('BACKGROUND', (0, i), (-1, i), WHITE))
+                style_commands.append(('TOPPADDING', (0, i), (-1, i), 2))
+                style_commands.append(('BOTTOMPADDING', (0, i), (-1, i), 2))
+            # Regular data row
+            else:
+                if row_idx % 2 == 0:
+                    style_commands.append(('BACKGROUND', (0, i), (-1, i), colors.Color(0.98, 0.98, 0.98)))
+                else:
+                    style_commands.append(('BACKGROUND', (0, i), (-1, i), WHITE))
+                row_idx += 1
+        
+        # BRANCH TOTAL row styling
+        for i, row in enumerate(table_data):
+            if 'BRANCH TOTAL' in str(row[1]):
+                style_commands.append(('BACKGROUND', (0, i), (-1, i), BLACK))
+                style_commands.append(('TEXTCOLOR', (0, i), (-1, i), WHITE))
+                style_commands.append(('FONTNAME', (0, i), (-1, i), 'Helvetica-Bold'))
+                style_commands.append(('LINEABOVE', (0, i), (-1, i), 2, BLACK))
+        
+        branch_table.setStyle(TableStyle(style_commands))
+        story.append(branch_table)
         
         story.append(PageBreak())
     
